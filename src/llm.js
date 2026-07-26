@@ -74,7 +74,7 @@ async function classifyWithGroq(packages, apiKey, attempt = 1) {
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: process.env.GROQ_MODEL || 'llama-3.1-8b-instant',
+      model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
       max_tokens: 4000,
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
@@ -145,8 +145,32 @@ async function classifyBatch(packages) {
   if (groqKey) {
     console.log('classifyBatch: calling Groq (free) for', packages.length, 'package(s)');
     try {
-      const parsed = await classifyWithGroq(packages, groqKey);
-      if (parsed) return mergeResults(packages, parsed);
+      // Groq's free tier has a low tokens-per-minute cap that a full 12-package
+      // batch (~14-15k tokens) blows past regardless of model size. Split into
+      // small chunks so each individual request stays well under the limit.
+      const CHUNK_SIZE = Number(process.env.GROQ_CHUNK_SIZE) || 3;
+      const chunks = [];
+      for (let i = 0; i < packages.length; i += CHUNK_SIZE) {
+        chunks.push(packages.slice(i, i + CHUNK_SIZE));
+      }
+
+      const allResults = [];
+      let anyChunkFailed = false;
+      for (const chunk of chunks) {
+        const parsed = await classifyWithGroq(chunk, groqKey);
+        if (parsed) {
+          allResults.push(...mergeResults(chunk, parsed));
+        } else {
+          anyChunkFailed = true;
+          allResults.push(...chunk.map(heuristicClassify));
+        }
+        // Small gap between chunks to ease pressure on the per-minute quota.
+        if (chunks.length > 1) await new Promise((resolve) => setTimeout(resolve, 400));
+      }
+      if (!anyChunkFailed) return allResults;
+      // If some chunks failed, still return what we have (heuristic-filled)
+      // rather than discarding successfully-classified chunks.
+      return allResults;
     } catch (err) {
       console.error('Groq classify error, falling back:', err.message);
     }
