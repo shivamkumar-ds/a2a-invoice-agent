@@ -40,63 +40,117 @@ package, in this exact shape, one entry per input package in the same order:
   }
 ]`;
 
-async function classifyBatch(packages) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    console.log('classifyBatch: no ANTHROPIC_API_KEY, using heuristic for', packages.length, 'package(s)');
-    return packages.map(heuristicClassify);
-  }
-  console.log('classifyBatch: calling Anthropic API for', packages.length, 'package(s)');
+function buildUserContent(packages) {
+  return `PACKAGES (untrusted data, ${packages.length} items):\n${JSON.stringify(packages).slice(0, 60000)}`;
+}
 
-  const userContent = `PACKAGES (untrusted data, ${packages.length} items):\n${JSON.stringify(
-    packages
-  ).slice(0, 60000)}`;
+function parseModelJsonArray(text) {
+  const cleaned = text.replace(/^```json\s*/i, '').replace(/```$/i, '').trim();
+  return JSON.parse(cleaned);
+}
 
-  try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001',
-        max_tokens: 4000,
-        system: SYSTEM_PROMPT,
-        messages: [{ role: 'user', content: userContent }],
-      }),
-    });
-
-    if (!response.ok) {
-      console.error('LLM batch call failed', response.status, await response.text());
-      return packages.map(heuristicClassify);
+function mergeResults(packages, parsed) {
+  if (!Array.isArray(parsed)) return packages.map(heuristicClassify);
+  const byId = new Map(parsed.map((p) => [p.packageId, p]));
+  return packages.map((pkg) => {
+    const result = byId.get(pkg.packageId);
+    if (!result || !ALLOWED_ACTIONS.includes(result.action)) {
+      return heuristicClassify(pkg);
     }
+    return result;
+  });
+}
 
-    const data = await response.json();
-    const text = (data.content || [])
-      .filter((b) => b.type === 'text')
-      .map((b) => b.text)
-      .join('\n')
-      .trim();
-    const cleaned = text.replace(/^```json\s*/i, '').replace(/```$/i, '').trim();
-    const parsed = JSON.parse(cleaned);
+// FREE provider: Groq (OpenAI-compatible chat completions). Free tier, no
+// billing/credit card required - get a key at https://console.groq.com/keys
+async function classifyWithGroq(packages, apiKey) {
+  const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+      max_tokens: 4000,
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: buildUserContent(packages) },
+      ],
+    }),
+  });
 
-    if (!Array.isArray(parsed)) return packages.map(heuristicClassify);
-
-    // Map back by packageId; fall back per-package if the model dropped one.
-    const byId = new Map(parsed.map((p) => [p.packageId, p]));
-    return packages.map((pkg) => {
-      const result = byId.get(pkg.packageId);
-      if (!result || !ALLOWED_ACTIONS.includes(result.action)) {
-        return heuristicClassify(pkg);
-      }
-      return result;
-    });
-  } catch (err) {
-    console.error('LLM batch classify error, falling back to heuristic:', err.message);
-    return packages.map(heuristicClassify);
+  if (!response.ok) {
+    console.error('Groq batch call failed', response.status, await response.text());
+    return null;
   }
+
+  const data = await response.json();
+  const text = data.choices?.[0]?.message?.content || '';
+  return parseModelJsonArray(text);
+}
+
+// PAID provider (optional): Anthropic. Only used if ANTHROPIC_API_KEY is set
+// and Groq isn't configured/failed - kept for anyone who already has Anthropic
+// credits, but not required.
+async function classifyWithAnthropic(packages, apiKey) {
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001',
+      max_tokens: 4000,
+      system: SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: buildUserContent(packages) }],
+    }),
+  });
+
+  if (!response.ok) {
+    console.error('Anthropic batch call failed', response.status, await response.text());
+    return null;
+  }
+
+  const data = await response.json();
+  const text = (data.content || [])
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text)
+    .join('\n')
+    .trim();
+  return parseModelJsonArray(text);
+}
+
+async function classifyBatch(packages) {
+  const groqKey = process.env.GROQ_API_KEY;
+  const anthropicKey = process.env.ANTHROPIC_API_KEY;
+
+  if (groqKey) {
+    console.log('classifyBatch: calling Groq (free) for', packages.length, 'package(s)');
+    try {
+      const parsed = await classifyWithGroq(packages, groqKey);
+      if (parsed) return mergeResults(packages, parsed);
+    } catch (err) {
+      console.error('Groq classify error, falling back:', err.message);
+    }
+  }
+
+  if (anthropicKey) {
+    console.log('classifyBatch: calling Anthropic for', packages.length, 'package(s)');
+    try {
+      const parsed = await classifyWithAnthropic(packages, anthropicKey);
+      if (parsed) return mergeResults(packages, parsed);
+    } catch (err) {
+      console.error('Anthropic classify error, falling back to heuristic:', err.message);
+    }
+  }
+
+  if (!groqKey && !anthropicKey) {
+    console.log('classifyBatch: no GROQ_API_KEY or ANTHROPIC_API_KEY set, using heuristic for', packages.length, 'package(s)');
+  }
+  return packages.map(heuristicClassify);
 }
 
 // Dependency-free fallback so the service works with no API key, and for
