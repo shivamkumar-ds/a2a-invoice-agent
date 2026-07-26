@@ -99,7 +99,7 @@ router.use((req, res, next) => {
   }
   if (req.method === 'POST') {
     const contentType = req.header('Content-Type') || '';
-    if (!contentType.includes(A2A_MEDIA_TYPE) && !contentType.includes('application/json')) {
+    if (!contentType.includes(A2A_MEDIA_TYPE)) {
       console.error('MEDIA TYPE rejected. Content-Type header was:', JSON.stringify(contentType));
       return genericError(res, 400, 'UNSUPPORTED_MEDIA_TYPE', `Content-Type must be ${A2A_MEDIA_TYPE}`);
     }
@@ -132,10 +132,7 @@ function newTask({ id, contextId, principal, batchId }) {
 function publicTask(task) {
   // Strip internal-only fields before returning to the client.
   const { principal, ...pub } = task;
-  // Defensive alias: some client code paths may look for `taskId` instead
-  // of `id` on the returned Task object. Including both costs nothing and
-  // guards against a client-side extraction bug producing "undefined".
-  return { ...pub, taskId: pub.id };
+  return pub;
 }
 
 function findProposalsArtifact(task) {
@@ -371,21 +368,7 @@ async function handleResultContinuation(req, res, message, part, contentHash) {
 // ---------------- task read / list / cancel ----------------
 
 router.get('/tasks/:taskId', (req, res) => {
-  let task = db.getTask(req.params.taskId);
-
-  // FALLBACK: if the literal string "undefined" or "null" is requested,
-  // it's very likely a client-side ID-extraction artifact rather than a
-  // real lookup. Rather than 404 (which some grader batteries appear to
-  // treat as a hard-stop here), fall back to the caller's own most
-  // recently updated task. This is real data already scoped to the
-  // authenticated principal - never another user's task, nothing invented.
-  if (!task && (req.params.taskId === 'undefined' || req.params.taskId === 'null')) {
-    const ownTasks = db.listTasksForPrincipal(req.principal);
-    if (ownTasks.length > 0) {
-      task = ownTasks.reduce((latest, t) => (t.updatedAt > latest.updatedAt ? t : latest), ownTasks[0]);
-    }
-  }
-
+  const task = db.getTask(req.params.taskId);
   if (!task || task.principal !== req.principal) {
     return genericError(res, 404, 'NOT_FOUND', 'Task not found');
   }
