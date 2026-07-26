@@ -12,10 +12,11 @@ function buildAgentCard(baseUrl) {
     description:
       'Reads invoice claim batches, reconciles each package against policy and history, and proposes one typed business action per invoice with cited evidence.',
     version: '1.0.0',
-    capabilities: {
-      streaming: false,
-      pushNotifications: false,
-    },
+    // Top-level url mirrors the primary interface - some A2A client/validator
+    // implementations read this instead of (or in addition to)
+    // supportedInterfaces[0].url.
+    url: baseUrl,
+    capabilities: {},
     skills: [
       {
         id: 'invoice_action_agent',
