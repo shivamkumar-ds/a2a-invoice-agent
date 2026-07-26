@@ -441,6 +441,12 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`A2A invoice agent listening on port ${PORT}`);
   console.log(`Agent Card base URL: ${BASE_URL}`);
+  const key = process.env.ANTHROPIC_API_KEY;
+  console.log(
+    'ANTHROPIC_API_KEY present:',
+    !!key,
+    key ? `(length ${key.length}, starts "${key.slice(0, 7)}...")` : '(NOT SET - using heuristic fallback for all classifications)'
+  );
 });
 
 module.exports = app;
