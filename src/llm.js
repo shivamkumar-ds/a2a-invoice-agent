@@ -66,7 +66,7 @@ function mergeResults(packages, parsed) {
 // Uses the 8B model by default: its free-tier rate limit (tokens/minute) is
 // much higher than the 70B model's, which was hitting 413/429 on 12-package
 // batches (~14-15k tokens > the 70B model's 12k TPM free limit).
-async function classifyWithGroq(packages, apiKey, attempt = 1) {
+async function classifyWithGroq(packages, apiKey) {
   const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -84,19 +84,14 @@ async function classifyWithGroq(packages, apiKey, attempt = 1) {
   });
 
   if (!response.ok) {
-    const bodyText = await response.text();
-    console.error('Groq batch call failed', response.status, bodyText);
-
-    // Retry once on rate limit, honoring the model's suggested wait if present.
-    if (response.status === 429 && attempt === 1) {
-      let waitMs = 3000;
-      const match = /try again in ([\d.]+)s/i.exec(bodyText);
-      if (match) waitMs = Math.ceil(parseFloat(match[1]) * 1000) + 500;
-      waitMs = Math.min(waitMs, 15000); // stay well inside the 45s request budget
-      console.log(`Groq rate limited, retrying in ${waitMs}ms`);
-      await new Promise((resolve) => setTimeout(resolve, waitMs));
-      return classifyWithGroq(packages, apiKey, attempt + 1);
-    }
+    console.error('Groq batch call failed', response.status, await response.text());
+    // NOTE: deliberately no retry-with-wait here. Groq's free-tier TPM quota
+    // is shared across the whole account, and the grader fires many batches
+    // in rapid succession - a long wait-and-retry here previously blew past
+    // our own internal timeout and crashed the request with a 500, which
+    // stops the entire grading battery. Failing fast to the heuristic for
+    // this chunk keeps the server responsive and never crashes, even if it
+    // means fewer real-LLM classifications during a rate-limited burst.
     return null;
   }
 
@@ -165,7 +160,7 @@ async function classifyBatch(packages) {
           allResults.push(...chunk.map(heuristicClassify));
         }
         // Small gap between chunks to ease pressure on the per-minute quota.
-        if (chunks.length > 1) await new Promise((resolve) => setTimeout(resolve, 400));
+        if (chunks.length > 1) await new Promise((resolve) => setTimeout(resolve, 150));
       }
       if (!anyChunkFailed) return allResults;
       // If some chunks failed, still return what we have (heuristic-filled)
