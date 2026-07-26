@@ -34,9 +34,11 @@ function sendA2A(res, status, body) {
   return res.status(status).type(A2A_MEDIA_TYPE).json(body);
 }
 
-function genericError(res, status, code, message) {
+function genericError(res, status, code, message, task) {
   console.log('OUTGOING ERROR', status, code, message, 'path=' + res.req.path);
-  return sendA2A(res, status, { error: { code, message } });
+  const body = { error: { code, message } };
+  if (task) body.task = publicTask(task);
+  return sendA2A(res, status, body);
 }
 
 // ---------------- public discovery (no auth) ----------------
@@ -162,12 +164,18 @@ router.post(/^\/message:send$/, async (req, res) => {
     const contentHash = messageContentHash(message);
     const existingDedup = db.getDedup(req.principal, message.messageId);
     if (existingDedup) {
+      const originalTask = db.getTask(existingDedup.taskId);
       if (existingDedup.contentHash !== contentHash) {
-        return genericError(res, 409, 'IDEMPOTENCY_CONFLICT', 'messageId reused with changed content');
+        return genericError(
+          res,
+          409,
+          'IDEMPOTENCY_CONFLICT',
+          'messageId reused with changed content',
+          originalTask && originalTask.principal === req.principal ? originalTask : undefined
+        );
       }
-      const existingTask = db.getTask(existingDedup.taskId);
-      if (existingTask && existingTask.principal === req.principal) {
-        return sendA2A(res, 200, { task: publicTask(existingTask) });
+      if (originalTask && originalTask.principal === req.principal) {
+        return sendA2A(res, 200, { task: publicTask(originalTask) });
       }
     }
 
@@ -298,8 +306,9 @@ async function handleResultContinuation(req, res, message, part, contentHash) {
   }
   if (task.status.state !== 'TASK_STATE_INPUT_REQUIRED') {
     // Terminal already (COMPLETED/CANCELED), or racing with a cancel - either
-    // way this continuation cannot apply.
-    return genericError(res, 409, 'TASK_NOT_PENDING', 'Task is not awaiting results');
+    // way this continuation cannot apply. Include the task so the client
+    // always has a valid task.id to continue polling from, even on error.
+    return genericError(res, 409, 'TASK_NOT_PENDING', 'Task is not awaiting results', task);
   }
 
   const proposalsArtifact = findProposalsArtifact(task);
@@ -334,7 +343,7 @@ async function handleResultContinuation(req, res, message, part, contentHash) {
   // of a concurrent cancel and a concurrent receipt should win.
   const freshTask = db.getTask(task.id);
   if (!freshTask || freshTask.status.state !== 'TASK_STATE_INPUT_REQUIRED') {
-    return genericError(res, 409, 'TASK_NOT_PENDING', 'Task is not awaiting results');
+    return genericError(res, 409, 'TASK_NOT_PENDING', 'Task is not awaiting results', freshTask || task);
   }
 
   freshTask.status = { state: 'TASK_STATE_COMPLETED' };
@@ -380,13 +389,13 @@ router.post(/^\/tasks\/([^/]+):cancel$/, (req, res) => {
     return genericError(res, 404, 'NOT_FOUND', 'Task not found');
   }
   if (task.status.state !== 'TASK_STATE_SUBMITTED' && task.status.state !== 'TASK_STATE_INPUT_REQUIRED' && task.status.state !== 'TASK_STATE_WORKING') {
-    return genericError(res, 409, 'TASK_ALREADY_TERMINAL', 'Task is already terminal');
+    return genericError(res, 409, 'TASK_ALREADY_TERMINAL', 'Task is already terminal', task);
   }
 
   // Re-check right before commit to close the cancel/receipt race.
   const freshTask = db.getTask(taskId);
   if (!freshTask || (freshTask.status.state !== 'TASK_STATE_SUBMITTED' && freshTask.status.state !== 'TASK_STATE_INPUT_REQUIRED' && freshTask.status.state !== 'TASK_STATE_WORKING')) {
-    return genericError(res, 409, 'TASK_ALREADY_TERMINAL', 'Task is already terminal');
+    return genericError(res, 409, 'TASK_ALREADY_TERMINAL', 'Task is already terminal', freshTask || task);
   }
 
   freshTask.status = { state: 'TASK_STATE_CANCELED' };
