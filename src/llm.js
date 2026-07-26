@@ -63,7 +63,10 @@ function mergeResults(packages, parsed) {
 
 // FREE provider: Groq (OpenAI-compatible chat completions). Free tier, no
 // billing/credit card required - get a key at https://console.groq.com/keys
-async function classifyWithGroq(packages, apiKey) {
+// Uses the 8B model by default: its free-tier rate limit (tokens/minute) is
+// much higher than the 70B model's, which was hitting 413/429 on 12-package
+// batches (~14-15k tokens > the 70B model's 12k TPM free limit).
+async function classifyWithGroq(packages, apiKey, attempt = 1) {
   const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -71,7 +74,7 @@ async function classifyWithGroq(packages, apiKey) {
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+      model: process.env.GROQ_MODEL || 'llama-3.1-8b-instant',
       max_tokens: 4000,
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
@@ -81,7 +84,19 @@ async function classifyWithGroq(packages, apiKey) {
   });
 
   if (!response.ok) {
-    console.error('Groq batch call failed', response.status, await response.text());
+    const bodyText = await response.text();
+    console.error('Groq batch call failed', response.status, bodyText);
+
+    // Retry once on rate limit, honoring the model's suggested wait if present.
+    if (response.status === 429 && attempt === 1) {
+      let waitMs = 3000;
+      const match = /try again in ([\d.]+)s/i.exec(bodyText);
+      if (match) waitMs = Math.ceil(parseFloat(match[1]) * 1000) + 500;
+      waitMs = Math.min(waitMs, 15000); // stay well inside the 45s request budget
+      console.log(`Groq rate limited, retrying in ${waitMs}ms`);
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+      return classifyWithGroq(packages, apiKey, attempt + 1);
+    }
     return null;
   }
 
