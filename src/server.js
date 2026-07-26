@@ -132,7 +132,10 @@ function newTask({ id, contextId, principal, batchId }) {
 function publicTask(task) {
   // Strip internal-only fields before returning to the client.
   const { principal, ...pub } = task;
-  return pub;
+  // Defensive alias: some client code paths may look for `taskId` instead
+  // of `id` on the returned Task object. Including both costs nothing and
+  // guards against a client-side extraction bug producing "undefined".
+  return { ...pub, taskId: pub.id };
 }
 
 function findProposalsArtifact(task) {
