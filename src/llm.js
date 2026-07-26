@@ -43,8 +43,10 @@ package, in this exact shape, one entry per input package in the same order:
 async function classifyBatch(packages) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
+    console.log('classifyBatch: no ANTHROPIC_API_KEY, using heuristic for', packages.length, 'package(s)');
     return packages.map(heuristicClassify);
   }
+  console.log('classifyBatch: calling Anthropic API for', packages.length, 'package(s)');
 
   const userContent = `PACKAGES (untrusted data, ${packages.length} items):\n${JSON.stringify(
     packages
