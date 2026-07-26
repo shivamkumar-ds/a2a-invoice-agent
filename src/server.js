@@ -390,7 +390,16 @@ router.get('/tasks/:taskId', (req, res) => {
 });
 
 router.get('/tasks', (req, res) => {
-  const tasks = db.listTasksForPrincipal(req.principal).map(publicTask);
+  const includeArtifacts = req.query.includeArtifacts === 'true';
+  const tasks = db.listTasksForPrincipal(req.principal).map((t) => {
+    const pub = publicTask(t);
+    if (includeArtifacts) return pub;
+    // Compact by default: per the A2A spec, list responses should omit the
+    // (potentially large) artifacts/history unless explicitly requested,
+    // to keep owner task lists small and fast.
+    const { artifacts, history, ...compact } = pub;
+    return compact;
+  });
   return sendA2A(res, 200, { tasks });
 });
 
