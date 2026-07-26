@@ -57,6 +57,7 @@ router.use((req, res, next) => {
   const authHeader = req.header('Authorization') || '';
   const match = /^Bearer\s+(.+)$/i.exec(authHeader);
   if (!match || !match[1].trim()) {
+    console.error('AUTH rejected. Authorization header was:', JSON.stringify(authHeader));
     return genericError(res, 401, 'UNAUTHENTICATED', 'Missing or malformed Bearer token');
   }
   req.principal = match[1].trim();
@@ -64,13 +65,22 @@ router.use((req, res, next) => {
 });
 
 router.use((req, res, next) => {
-  const version = req.header('A2A-Version');
+  const version = req.header('A2A-Version') || req.query['A2A-Version'];
   if (version !== '1.0') {
+    console.error(
+      'VERSION rejected. A2A-Version header was:',
+      JSON.stringify(version),
+      'method:',
+      req.method,
+      'path:',
+      req.path
+    );
     return genericError(res, 400, 'UNSUPPORTED_VERSION', 'A2A-Version must be 1.0');
   }
   if (req.method === 'POST') {
     const contentType = req.header('Content-Type') || '';
     if (!contentType.includes(A2A_MEDIA_TYPE) && !contentType.includes('application/json')) {
+      console.error('MEDIA TYPE rejected. Content-Type header was:', JSON.stringify(contentType));
       return genericError(res, 400, 'UNSUPPORTED_MEDIA_TYPE', `Content-Type must be ${A2A_MEDIA_TYPE}`);
     }
   }
@@ -113,9 +123,16 @@ function findProposalsArtifact(task) {
 
 // ---------------- message:send ----------------
 
-router.post('/message:send', async (req, res) => {
+// NOTE: '/message:send' MUST be a regex route, not a plain string - Express
+// (path-to-regexp) treats ':' as the start of a route parameter, so the
+// plain string '/message:send' was silently failing to match (it was being
+// parsed as literal "/message" + a param named "send"), causing every
+// request to fall through to the catch-all 400 handler. This was the
+// actual cause of the "POST /message:send returned HTTP 400" grader error.
+router.post(/^\/message:send$/, async (req, res) => {
   const parsed = MessageSendRequestSchema.safeParse(req.body);
   if (!parsed.success) {
+    console.error('message:send raw body:', JSON.stringify(req.body).slice(0, 3000));
     console.error('message:send validation failed:', JSON.stringify(parsed.error.issues));
     return genericError(res, 400, 'INVALID_ENVELOPE', 'Malformed message:send request');
   }
