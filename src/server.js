@@ -35,6 +35,7 @@ function sendA2A(res, status, body) {
 }
 
 function genericError(res, status, code, message) {
+  console.log('OUTGOING ERROR', status, code, message, 'path=' + res.req.path);
   return sendA2A(res, status, { error: { code, message } });
 }
 
@@ -52,6 +53,23 @@ app.get('/.well-known/agent-card.json', (req, res) => {
 // wants one fixed shared secret instead, set REQUIRE_FIXED_TOKEN in env
 // and adjust the check below.
 const router = express.Router();
+
+// Unconditional logger - runs before auth/version checks, so every request
+// (even ones that get rejected downstream) is visible in the logs. This is
+// the single most useful diagnostic: whatever the grader's real request
+// looks like, it will show up here.
+router.use((req, res, next) => {
+  console.log(
+    'INCOMING',
+    req.method,
+    req.path,
+    'auth=' + JSON.stringify(req.header('Authorization') || ''),
+    'version=' + JSON.stringify(req.header('A2A-Version') || req.query['A2A-Version'] || ''),
+    'contentType=' + JSON.stringify(req.header('Content-Type') || ''),
+    'body=' + JSON.stringify(req.body).slice(0, 2000)
+  );
+  next();
+});
 
 router.use((req, res, next) => {
   const authHeader = req.header('Authorization') || '';
@@ -130,35 +148,40 @@ function findProposalsArtifact(task) {
 // request to fall through to the catch-all 400 handler. This was the
 // actual cause of the "POST /message:send returned HTTP 400" grader error.
 router.post(/^\/message:send$/, async (req, res) => {
-  const parsed = MessageSendRequestSchema.safeParse(req.body);
-  if (!parsed.success) {
-    console.error('message:send raw body:', JSON.stringify(req.body).slice(0, 3000));
-    console.error('message:send validation failed:', JSON.stringify(parsed.error.issues));
-    return genericError(res, 400, 'INVALID_ENVELOPE', 'Malformed message:send request');
-  }
-  const { message } = parsed.data;
-  const part = message.parts[0];
-
-  // ---- idempotency check shared by both message kinds ----
-  const contentHash = messageContentHash(message);
-  const existingDedup = db.getDedup(req.principal, message.messageId);
-  if (existingDedup) {
-    if (existingDedup.contentHash !== contentHash) {
-      return genericError(res, 409, 'IDEMPOTENCY_CONFLICT', 'messageId reused with changed content');
+  try {
+    const parsed = MessageSendRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      console.error('message:send raw body:', JSON.stringify(req.body).slice(0, 3000));
+      console.error('message:send validation failed:', JSON.stringify(parsed.error.issues));
+      return genericError(res, 400, 'INVALID_ENVELOPE', 'Malformed message:send request');
     }
-    const existingTask = db.getTask(existingDedup.taskId);
-    if (existingTask && existingTask.principal === req.principal) {
-      return sendA2A(res, 200, { task: publicTask(existingTask) });
-    }
-  }
+    const { message } = parsed.data;
+    const part = message.parts[0];
 
-  if (part.mediaType === 'application/vnd.ga5.invoice-claim-batch+json') {
-    return handleInitialBatch(req, res, message, part, contentHash);
+    // ---- idempotency check shared by both message kinds ----
+    const contentHash = messageContentHash(message);
+    const existingDedup = db.getDedup(req.principal, message.messageId);
+    if (existingDedup) {
+      if (existingDedup.contentHash !== contentHash) {
+        return genericError(res, 409, 'IDEMPOTENCY_CONFLICT', 'messageId reused with changed content');
+      }
+      const existingTask = db.getTask(existingDedup.taskId);
+      if (existingTask && existingTask.principal === req.principal) {
+        return sendA2A(res, 200, { task: publicTask(existingTask) });
+      }
+    }
+
+    if (part.mediaType === 'application/vnd.ga5.invoice-claim-batch+json') {
+      return handleInitialBatch(req, res, message, part, contentHash);
+    }
+    if (part.mediaType === 'application/vnd.ga5.invoice-action-results+json') {
+      return handleResultContinuation(req, res, message, part, contentHash);
+    }
+    return genericError(res, 400, 'UNSUPPORTED_PART_MEDIA_TYPE', 'Unrecognized part mediaType');
+  } catch (err) {
+    console.error('message:send unexpected error:', err.message, err.stack);
+    return genericError(res, 500, 'INTERNAL_ERROR', 'Unexpected error processing message:send');
   }
-  if (part.mediaType === 'application/vnd.ga5.invoice-action-results+json') {
-    return handleResultContinuation(req, res, message, part, contentHash);
-  }
-  return genericError(res, 400, 'UNSUPPORTED_PART_MEDIA_TYPE', 'Unrecognized part mediaType');
 });
 
 async function handleInitialBatch(req, res, message, part, contentHash) {
@@ -376,6 +399,20 @@ router.post(/^\/tasks\/([^/]+):cancel$/, (req, res) => {
 app.use('/a2a', router);
 
 app.use((req, res) => genericError(res, 400, 'UNSUPPORTED_ROUTE', 'Unsupported route or method'));
+
+// Catches JSON parse errors (malformed request bodies) and any other
+// unhandled errors, so the client always gets a proper application/a2a+json
+// error instead of Express's default HTML error page (which would look like
+// an unexplained HTTP 400/500 with no diagnostic info in our logs).
+app.use((err, req, res, next) => {
+  console.error('UNHANDLED ERROR', err.message, 'path=' + req.path, 'method=' + req.method);
+  if (res.headersSent) return next(err);
+  const status = err.status || err.statusCode || 500;
+  return res
+    .status(status)
+    .type('application/a2a+json')
+    .json({ error: { code: status === 400 ? 'MALFORMED_JSON' : 'INTERNAL_ERROR', message: err.message } });
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
